@@ -56,7 +56,8 @@ where
 
 /// Alias for the tuple returned by `Spi::new` on error.
 type NewErr<P, SMI, MISO, MOSI, SCLK> = (UninitStateMachine<(P, SMI)>, (MISO, MOSI, SCLK));
-impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> Spi<'pio, P, SMI, MISO, MOSI, SCLK, DS>
+impl<'pio, P, SMI, MISO, MOSI, SCLK, const DATA_SIZE: u8>
+    Spi<'pio, P, SMI, MISO, MOSI, SCLK, DATA_SIZE>
 where
     P: PIOExt,
     SMI: StateMachineIndex,
@@ -152,8 +153,8 @@ where
             // msb/lsb first can be selected here
             .out_shift_direction(ShiftDirection::Left)
             .in_shift_direction(ShiftDirection::Left)
-            .pull_threshold(DS)
-            .push_threshold(DS)
+            .pull_threshold(DATA_SIZE)
+            .push_threshold(DATA_SIZE)
             .clock_divisor_fixed_point(int, frac)
             .build(sm);
 
