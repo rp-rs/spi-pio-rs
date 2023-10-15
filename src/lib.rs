@@ -1,6 +1,4 @@
 #![no_std]
-use core::marker::PhantomData;
-
 use embedded_hal::{
     blocking::spi,
     spi::{Phase, Polarity},
@@ -54,7 +52,6 @@ where
     tx: Tx<(P, SMI)>,
     rx: Rx<(P, SMI)>,
     _pins: Pins<P, MISO, MOSI, SCLK>,
-    _old_pins_states: PhantomData<(MISO, MOSI, SCLK)>,
 }
 
 /// Alias for the tuple returned by `Spi::new` on error.
@@ -198,7 +195,6 @@ where
             tx,
             rx,
             _pins: (miso, mosi, sclk),
-            _old_pins_states: PhantomData,
         })
     }
 }
