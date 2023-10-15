@@ -152,11 +152,11 @@ fn blink_signals(
 
 fn blink_signals_loop(
     pin: &mut impl OutputPin<Error = core::convert::Infallible>,
-    mut delay: impl DelayMs<u32>,
+    mut delay: impl DelayMs<u32> + Clone,
     sig: &[u8],
 ) -> ! {
     loop {
-        blink_signals(pin, delay, sig);
+        blink_signals(pin, delay.clone(), sig);
         delay.delay_ms(1000);
     }
 }
