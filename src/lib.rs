@@ -19,16 +19,12 @@ use rp2040_hal::{
 #[cfg(not(feature = "defmt"))]
 mod defmt {
     #[macro_export]
-    macro_rules! info {
-        ($($_:tt)*) => {{}};
-    }
-    #[macro_export]
     macro_rules! error {
         ($($_:tt)*) => {{}};
     }
 
     // macros are exported at the root of the crate so pull them back here
-    pub use super::{error, info};
+    pub use super::error;
 }
 
 /// Alias to the Pin tuple used in `Spi<…>`
