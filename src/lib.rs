@@ -6,94 +6,76 @@ use embedded_hal::{
 use fugit::HertzU32;
 use pio::{Instruction, InstructionOperands};
 use rp2040_hal::{
-    gpio::{Disabled, DisabledConfig, Function, FunctionConfig, Pin, PinId, ValidPinMode},
+    gpio::{
+        AnyPin, FunctionNull, FunctionSioInput, FunctionSioOutput, Pin, SpecificPin, ValidFunction,
+    },
     pio::{
         PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
         UninitStateMachine, PIO,
     },
+    typelevel::Is,
 };
 
 #[cfg(not(feature = "defmt"))]
 mod defmt {
-    #[macro_export]
-    macro_rules! info {
-        ($($_:tt)*) => {{
-            compile_error!("woops");
-        }};
-    }
     #[macro_export]
     macro_rules! error {
         ($($_:tt)*) => {{}};
     }
 
     // macros are exported at the root of the crate so pull them back here
-    pub use super::{error, info};
+    pub use super::error;
 }
 
+/// Alias to the Pin tuple used in `Spi<…>`
+pub type Pins<P, MISO, MOSI, SCLK> = (
+    Pin<<MISO as AnyPin>::Id, <P as PIOExt>::PinFunction, <MISO as AnyPin>::Pull>,
+    Pin<<MOSI as AnyPin>::Id, <P as PIOExt>::PinFunction, <MOSI as AnyPin>::Pull>,
+    Pin<<SCLK as AnyPin>::Id, <P as PIOExt>::PinFunction, <SCLK as AnyPin>::Pull>,
+);
+
+/// PIO based Spi driver.
 pub struct Spi<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8>
 where
-    P: PIOExt + FunctionConfig,
+    P: PIOExt,
     SMI: StateMachineIndex,
-    MISO: PinId,
-    MOSI: PinId,
-    SCLK: PinId,
-    Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
+    MISO: AnyPin,
+    MOSI: AnyPin,
+    SCLK: AnyPin,
 {
     _pio: &'pio mut PIO<P>,
     _sm: StateMachine<(P, SMI), rp2040_hal::pio::Running>,
     tx: Tx<(P, SMI)>,
     rx: Rx<(P, SMI)>,
-    #[allow(clippy::type_complexity)]
-    _pins: (
-        Pin<MISO, Function<P>>,
-        Pin<MOSI, Function<P>>,
-        Pin<SCLK, Function<P>>,
-    ),
+    _pins: Pins<P, MISO, MOSI, SCLK>,
 }
 
-type NewErr<P, SMI, MISO, MOSI, SCLK, MisoDisabledConfig, MosiDisabledConfig, SclkDisabledConfig> = (
-    UninitStateMachine<(P, SMI)>,
-    Pin<MISO, Disabled<MisoDisabledConfig>>,
-    Pin<MOSI, Disabled<MosiDisabledConfig>>,
-    Pin<SCLK, Disabled<SclkDisabledConfig>>,
-);
-impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> Spi<'pio, P, SMI, MISO, MOSI, SCLK, DS>
+/// Alias for the tuple returned by `Spi::new` on error.
+type NewErr<P, SMI, MISO, MOSI, SCLK> = (UninitStateMachine<(P, SMI)>, (MISO, MOSI, SCLK));
+impl<'pio, P, SMI, MISO, MOSI, SCLK, const DATA_SIZE: u8>
+    Spi<'pio, P, SMI, MISO, MOSI, SCLK, DATA_SIZE>
 where
-    P: PIOExt + FunctionConfig,
+    P: PIOExt,
     SMI: StateMachineIndex,
-    MISO: PinId,
-    MOSI: PinId,
-    SCLK: PinId,
-    Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
+    MISO: AnyPin,
+    MOSI: AnyPin,
+    SCLK: AnyPin,
 {
     #[allow(clippy::type_complexity)]
-    pub fn new<MisoDisabledConfig, MosiDisabledConfig, SclkDisabledConfig>(
+    pub fn new(
         (pio, sm): (&'pio mut PIO<P>, UninitStateMachine<(P, SMI)>),
-        (miso, mosi, mut sclk): (
-            Pin<MISO, Disabled<MisoDisabledConfig>>,
-            Pin<MOSI, Disabled<MosiDisabledConfig>>,
-            Pin<SCLK, Disabled<SclkDisabledConfig>>,
-        ),
+        (miso, mosi, sclk): (MISO, MOSI, SCLK),
         mode: embedded_hal::spi::Mode,
         bus_freq: HertzU32,
         clock_freq: HertzU32,
-    ) -> Result<
-        Self,
-        NewErr<
-            P,
-            SMI,
-            MISO,
-            MOSI,
-            SCLK,
-            MisoDisabledConfig,
-            MosiDisabledConfig,
-            SclkDisabledConfig,
-        >,
-    >
+    ) -> Result<Self, NewErr<P, SMI, MISO, MOSI, SCLK>>
     where
-        MisoDisabledConfig: DisabledConfig,
-        MosiDisabledConfig: DisabledConfig,
-        SclkDisabledConfig: DisabledConfig,
+        MISO: AnyPin<Function = FunctionNull> + Is<Type = SpecificPin<MISO>>,
+        MOSI: AnyPin<Function = FunctionNull> + Is<Type = SpecificPin<MOSI>>,
+        SCLK: AnyPin<Function = FunctionNull> + Is<Type = SpecificPin<SCLK>>,
+        MISO::Id: ValidFunction<P::PinFunction> + ValidFunction<FunctionSioInput>,
+        MOSI::Id: ValidFunction<P::PinFunction> + ValidFunction<FunctionSioOutput>,
+        SCLK::Id: ValidFunction<P::PinFunction> + ValidFunction<FunctionSioOutput>,
     {
         let program = pio_proc::pio_asm!(
         ".side_set 1 opt"
@@ -121,13 +103,13 @@ where
 
         let installed = match pio.install(&program) {
             Ok(inst) => inst,
-            Err(_) => return Err((sm, miso, mosi, sclk)),
+            Err(_) => return Err((sm, (miso, mosi, sclk))),
         };
         entry_point += i32::from(installed.offset());
         if entry_point > 32 {
             // TODO: this should check against a value from the PIO, not a hardcoded value.
             defmt::error!("Entry point set beyond pio's memory.");
-            return Err((sm, miso, mosi, sclk));
+            return Err((sm, (miso, mosi, sclk)));
         }
         let entry_point = entry_point as u8;
 
@@ -141,7 +123,7 @@ where
         if !(1..=65536).contains(&int) || (int == 65536 && frac != 0) {
             defmt::error!("The ratio between the bus frequency and the system clock must be within [1.0, 65536.0].");
             pio.uninstall(installed);
-            return Err((sm, miso, mosi, sclk));
+            return Err((sm, (miso, mosi, sclk)));
         }
         // 65536.0 is represented as 0 in the pio's clock divider
         if int == 65536 {
@@ -151,18 +133,24 @@ where
         let int: u16 = int as u16;
         let frac: u8 = frac as u8;
 
+        let mosi = mosi.into();
+        let miso = miso.into();
+        let mut sclk = sclk.into();
+        let mosi_pin_id = mosi.id();
+        let miso_pin_id = miso.id();
+        let sclk_pin_id = sclk.id();
         let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
             .buffers(rp2040_hal::pio::Buffers::RxTx)
-            .out_pins(MOSI::DYN.num, 1)
-            .in_pin_base(MISO::DYN.num)
-            .side_set_pin_base(SCLK::DYN.num)
+            .out_pins(mosi_pin_id.num, 1)
+            .in_pin_base(miso_pin_id.num)
+            .side_set_pin_base(sclk_pin_id.num)
             .autopull(true)
             .autopush(true)
             // msb/lsb first can be selected here
             .out_shift_direction(ShiftDirection::Left)
             .in_shift_direction(ShiftDirection::Left)
-            .pull_threshold(DS)
-            .push_threshold(DS)
+            .pull_threshold(DATA_SIZE)
+            .push_threshold(DATA_SIZE)
             .clock_divisor_fixed_point(int, frac)
             .build(sm);
 
@@ -172,21 +160,21 @@ where
             sclk.set_output_override(rp2040_hal::gpio::OutputOverride::DontInvert);
         }
         let sclk = sclk.into_push_pull_output_in_state(rp2040_hal::gpio::PinState::Low);
-        let miso = miso.into_floating_input();
+        let miso = miso.into_function::<FunctionSioInput>();
         let mosi = mosi.into_push_pull_output_in_state(rp2040_hal::gpio::PinState::Low);
 
         sm.set_pins([
-            (MOSI::DYN.num, PinState::Low),
-            (SCLK::DYN.num, PinState::Low),
+            (mosi_pin_id.num, PinState::Low),
+            (sclk_pin_id.num, PinState::Low),
         ]);
         sm.set_pindirs([
-            (MISO::DYN.num, PinDir::Input),
-            (MOSI::DYN.num, PinDir::Output),
-            (SCLK::DYN.num, PinDir::Output),
+            (miso_pin_id.num, PinDir::Input),
+            (mosi_pin_id.num, PinDir::Output),
+            (sclk_pin_id.num, PinDir::Output),
         ]);
-        let miso = miso.into_mode();
-        let mosi = mosi.into_mode();
-        let sclk = sclk.into_mode();
+        let miso = miso.into_function();
+        let mosi = mosi.into_function();
+        let sclk = sclk.into_function();
 
         sm.exec_instruction(Instruction {
             operands: InstructionOperands::JMP {
@@ -209,72 +197,68 @@ where
 }
 
 macro_rules! impl_write {
-    ($type:ty, $fn:ident, [$($nr:expr),+]) => {
-        $(
-        impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal::spi::FullDuplex<$type>
-            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-        where
-            P: PIOExt + FunctionConfig,
-            SMI: StateMachineIndex,
-            MISO: PinId,
-            MOSI: PinId,
-            SCLK: PinId,
-            Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
-        {
-            type Error = core::convert::Infallible;
+        ($type:ty, $fn:ident, [$($nr:expr),+]) => {
+            $(
+                impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal::spi::FullDuplex<$type>
+                for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+                where
+                P: PIOExt,
+                SMI: StateMachineIndex,
+                MISO: AnyPin,
+                MOSI: AnyPin,
+                SCLK: AnyPin,
+                {
+                    type Error = core::convert::Infallible;
 
-            fn read(&mut self) -> nb::Result<$type, Self::Error> {
-                if let Some(r) = self.rx.read() {
-                    Ok(r as $type)
-                } else {
-                    Err(nb::Error::WouldBlock)
-                }
-            }
+                    fn read(&mut self) -> nb::Result<$type, Self::Error> {
+                        if let Some(r) = self.rx.read() {
+                            Ok(r as $type)
+                        } else {
+                            Err(nb::Error::WouldBlock)
+                        }
+                    }
 
-            fn send(&mut self, word: $type) -> nb::Result<(), Self::Error> {
-                if self.tx.$fn(word) {
-                    Ok(())
-                } else {
-                    Err(nb::Error::WouldBlock)
+                    fn send(&mut self, word: $type) -> nb::Result<(), Self::Error> {
+                        if self.tx.$fn(word) {
+                            Ok(())
+                        } else {
+                            Err(nb::Error::WouldBlock)
+                        }
+                    }
                 }
-            }
-        }
-        impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write::Default<$type>
-            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-        where
-            P: PIOExt + FunctionConfig,
-            SMI: StateMachineIndex,
-            MISO: PinId,
-            MOSI: PinId,
-            SCLK: PinId,
-            Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
-        {
-        }
-        impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::transfer::Default<$type>
-            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-        where
-            P: PIOExt + FunctionConfig,
-            SMI: StateMachineIndex,
-            MISO: PinId,
-            MOSI: PinId,
-            SCLK: PinId,
-            Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
-        {
-        }
-        impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write_iter::Default<$type>
-            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-        where
-            P: PIOExt + FunctionConfig,
-            SMI: StateMachineIndex,
-            MISO: PinId,
-            MOSI: PinId,
-            SCLK: PinId,
-            Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
-        {
-        }
-        )+
-    };
-}
+                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write::Default<$type>
+                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+                        where
+                    P: PIOExt,
+                    SMI: StateMachineIndex,
+                    MISO: AnyPin,
+                    MOSI: AnyPin,
+                    SCLK: AnyPin,
+                {
+                }
+                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::transfer::Default<$type>
+                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+                        where
+                    P: PIOExt,
+                    SMI: StateMachineIndex,
+                    MISO: AnyPin,
+                    MOSI: AnyPin,
+                    SCLK: AnyPin,
+                {
+                }
+                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write_iter::Default<$type>
+                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+                        where
+                    P: PIOExt,
+                    SMI: StateMachineIndex,
+                    MISO: AnyPin,
+                    MOSI: AnyPin,
+                    SCLK: AnyPin,
+                {
+                }
+            )+
+        };
+    }
 impl_write!(u8, write_u8_replicated, [1, 2, 3, 4, 5, 6, 7, 8]);
 impl_write!(u16, write_u16_replicated, [9, 10, 11, 12, 13, 14, 15, 16]);
 impl_write!(
@@ -283,15 +267,14 @@ impl_write!(
     [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
 );
 
-impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> rp2040_hal::dma::ReadTarget
+unsafe impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> rp2040_hal::dma::ReadTarget
     for Spi<'pio, P, SMI, MISO, MOSI, SCLK, DS>
 where
-    P: PIOExt + FunctionConfig,
+    P: PIOExt,
     SMI: StateMachineIndex,
-    MISO: PinId,
-    MOSI: PinId,
-    SCLK: PinId,
-    Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
+    MISO: AnyPin,
+    MOSI: AnyPin,
+    SCLK: AnyPin,
 {
     type ReceivedWord = u32;
 
@@ -307,15 +290,14 @@ where
         self.rx.rx_increment()
     }
 }
-impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> rp2040_hal::dma::WriteTarget
+unsafe impl<'pio, P, SMI, MISO, MOSI, SCLK, const DS: u8> rp2040_hal::dma::WriteTarget
     for Spi<'pio, P, SMI, MISO, MOSI, SCLK, DS>
 where
-    P: PIOExt + FunctionConfig,
+    P: PIOExt,
     SMI: StateMachineIndex,
-    MISO: PinId,
-    MOSI: PinId,
-    SCLK: PinId,
-    Function<P>: ValidPinMode<MISO> + ValidPinMode<MOSI> + ValidPinMode<SCLK>,
+    MISO: AnyPin,
+    MOSI: AnyPin,
+    SCLK: AnyPin,
 {
     type TransmittedWord = u32;
 
